@@ -116,7 +116,17 @@ BigFloat(x)
 widen(::Type{Float64}) = BigFloat
 widen(::Type{BigFloat}) = BigFloat
 
-BigFloat(x::BigFloat) = x
+function BigFloat(x::BigFloat)
+    if precision(BigFloat) == precision(x)
+        x
+    else
+        z = BigFloat()
+        ccall((:mpfr_set, :libmpfr), Int32, (Ref{BigFloat}, Ref{BigFloat}, Int32),
+              z, x, ROUNDING_MODE[])
+        z
+    end
+end
+
 
 # convert to BigFloat
 for (fJ, fC) in ((:si,:Clong), (:ui,:Culong))
@@ -133,8 +143,7 @@ function BigFloat(x::Float64)
     z = BigFloat()
     ccall((:mpfr_set_d, :libmpfr), Int32, (Ref{BigFloat}, Float64, Int32), z, x, ROUNDING_MODE[])
     if isnan(x) && signbit(x) != signbit(z)
-        # for some reason doing mpfr_neg in-place doesn't work here
-        return -z
+        z.sign = -z.sign
     end
     return z
 end

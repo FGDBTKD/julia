@@ -38,11 +38,7 @@
 #include <functional>
 
 // target machine computation
-#if JL_LLVM_VERSION >= 60000
 #include <llvm/CodeGen/TargetSubtargetInfo.h>
-#else
-#include <llvm/Target/TargetSubtargetInfo.h>
-#endif
 #include <llvm/Support/TargetRegistry.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Support/Host.h>
@@ -70,11 +66,7 @@
 #include <llvm/Transforms/Utils/Cloning.h> // for llvmcall inlining
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/IR/Verifier.h> // for llvmcall validation
-#if JL_LLVM_VERSION >= 40000
-#  include <llvm/Bitcode/BitcodeWriter.h>
-#else
-#  include <llvm/Bitcode/ReaderWriter.h>
-#endif
+#include <llvm/Bitcode/BitcodeWriter.h>
 
 // C API
 #include <llvm-c/Types.h>
@@ -112,11 +104,7 @@ namespace llvm {
 // LLVM version compatibility macros
 legacy::PassManager *jl_globalPM;
 
-#if JL_LLVM_VERSION >= 40000
 #define DIFlagZero (DINode::FlagZero)
-#else
-#define DIFlagZero (0)
-#endif
 
 extern "C" {
 
@@ -299,7 +287,10 @@ static Function *jlgetfield_func;
 static Function *jlmethod_func;
 static Function *jlgenericfunction_func;
 static Function *jlenter_func;
+static Function *jl_current_exception_func;
 static Function *jlleave_func;
+static Function *jl_restore_excstack_func;
+static Function *jl_excstack_state_func;
 static Function *jlegal_func;
 static Function *jl_alloc_obj_func;
 static Function *jl_newbits_func;
@@ -332,7 +323,6 @@ static Function *jlgetnthfieldchecked_func;
 //static Function *jlsetnthfield_func;
 static Function *jlgetcfunctiontrampoline_func;
 #ifdef _OS_WINDOWS_
-static Function *resetstkoflw_func;
 #if defined(_CPU_X86_64_)
 Function *juliapersonality_func;
 #endif
@@ -362,11 +352,7 @@ extern "C" {
 template<typename T>
 static void add_return_attr(T *f, Attribute::AttrKind Kind)
 {
-#if JL_LLVM_VERSION >= 50000
     f->addAttribute(AttributeList::ReturnIndex, Kind);
-#else
-    f->addAttribute(AttributeSet::ReturnIndex, Kind);
-#endif
 }
 
 static MDNode *best_tbaa(jl_value_t *jt) {
@@ -591,9 +577,7 @@ static GlobalVariable *get_pointer_to_constant(Constant *val, StringRef name, Mo
 static AllocaInst *emit_static_alloca(jl_codectx_t &ctx, Type *lty, int arraysize=1)
 {
     return new AllocaInst(lty,
-#if JL_LLVM_VERSION >= 50000
             0,
-#endif
             ConstantInt::get(T_int32, arraysize), "", /*InsertBefore=*/ctx.ptlsStates);
 }
 
@@ -801,9 +785,8 @@ static void emit_write_barrier(jl_codectx_t&, Value*, Value*);
 
 static void jl_rethrow_with_add(const char *fmt, ...)
 {
-    jl_ptls_t ptls = jl_get_ptls_states();
-    if (jl_typeis(ptls->exception_in_transit, jl_errorexception_type)) {
-        char *str = jl_string_data(jl_fieldref(ptls->exception_in_transit,0));
+    if (jl_typeis(jl_current_exception(), jl_errorexception_type)) {
+        char *str = jl_string_data(jl_fieldref(jl_current_exception(),0));
         char buf[1024];
         va_list args;
         va_start(args, fmt);
@@ -1058,6 +1041,8 @@ const char *name_from_method_instance(jl_method_instance_t *li)
     return jl_is_method(li->def.method) ? jl_symbol_name(li->def.method->name) : "top-level scope";
 }
 
+// Use of `li` is not clobbered in JL_TRY
+JL_GCC_IGNORE_START("-Wclobbered")
 // this generates llvm code for the lambda info
 // and adds the result to the jitlayers
 // (and the shadow module), but doesn't yet compile
@@ -1250,6 +1235,7 @@ locked_out:
     JL_GC_POP();
     return decls;
 }
+JL_GCC_IGNORE_STOP
 
 #define getModuleFlag(m,str) m->getModuleFlag(str)
 
@@ -1274,11 +1260,7 @@ static void jl_setup_module(Module *m, const jl_cgparams_t *params = &jl_default
     if (!getModuleFlag(m,"Debug Info Version"))
         m->addModuleFlag(llvm::Module::Error, "Debug Info Version",
             llvm::DEBUG_METADATA_VERSION);
-#if JL_LLVM_VERSION >= 40000
     m->setDataLayout(jl_data_layout);
-#else
-    m->setDataLayout(jl_ExecutionEngine->getDataLayout());
-#endif
     m->setTargetTriple(jl_TargetMachine->getTargetTriple().str());
 
 }
@@ -1311,13 +1293,9 @@ uint64_t jl_get_llvm_fptr(void *function)
     Function *F = (Function*)function;
     uint64_t addr = getAddressForFunction(F->getName());
     if (!addr) {
-#if JL_LLVM_VERSION >= 50000
         if (auto exp_addr = jl_ExecutionEngine->findUnmangledSymbol(F->getName()).getAddress()) {
             addr = exp_addr.get();
         }
-#else
-        addr = jl_ExecutionEngine->findUnmangledSymbol(F->getName()).getAddress();
-#endif
     }
     return addr;
 }
@@ -1799,7 +1777,13 @@ static jl_value_t *static_apply_type(jl_codectx_t &ctx, const jl_cgval_t *args, 
     size_t last_age = jl_get_ptls_states()->world_age;
     // call apply_type, but ignore errors. we know that will work in world 1.
     jl_get_ptls_states()->world_age = 1;
-    jl_value_t *result = jl_apply_with_saved_exception_state(v, nargs, 1);
+    jl_value_t *result;
+    JL_TRY {
+        result = jl_apply(v, nargs);
+    }
+    JL_CATCH {
+        result = NULL;
+    }
     jl_get_ptls_states()->world_age = last_age;
     return result;
 }
@@ -1881,7 +1865,13 @@ static jl_value_t *static_eval(jl_codectx_t &ctx, jl_value_t *ex, int sparams=tr
                     size_t last_age = jl_get_ptls_states()->world_age;
                     // here we know we're calling specific builtin functions that work in world 1.
                     jl_get_ptls_states()->world_age = 1;
-                    jl_value_t *result = jl_apply_with_saved_exception_state(v, n+1, 1);
+                    jl_value_t *result;
+                    JL_TRY {
+                        result = jl_apply(v, n+1);
+                    }
+                    JL_CATCH {
+                        result = NULL;
+                    }
                     jl_get_ptls_states()->world_age = last_age;
                     JL_GC_POP();
                     return result;
@@ -3005,6 +2995,12 @@ static jl_cgval_t emit_call_specfun_other(jl_codectx_t &ctx, jl_method_instance_
             argvals[idx] = maybe_decay_untracked(boxed(ctx, arg));
         }
         else if (et->isAggregateType()) {
+            if (!arg.ispointer()) {
+                // This can happen in dead code if there's a type mismatch
+                // Exit early
+                CreateTrap(ctx.builder);
+                return jl_cgval_t();
+            }
             // can lazy load on demand, no copy needed
             assert(at == PointerType::get(et, AddressSpace::Derived));
             assert(arg.ispointer());
@@ -3013,7 +3009,13 @@ static jl_cgval_t emit_call_specfun_other(jl_codectx_t &ctx, jl_method_instance_
         }
         else {
             assert(at == et);
-            argvals[idx] = emit_unbox(ctx, et, arg, jt);
+            Value *val = emit_unbox(ctx, et, arg, jt);
+            if (!val) {
+                // There was a type mismatch of some sort - exit early
+                CreateTrap(ctx.builder);
+                return jl_cgval_t();
+            }
+            argvals[idx] = val;
         }
         idx++;
     }
@@ -3387,11 +3389,7 @@ static jl_cgval_t emit_varinfo(jl_codectx_t &ctx, jl_varinfo_t &vi, jl_sym_t *va
                 ctx.builder.CreateStore(unbox, ssaslot);
             }
             else {
-#if JL_LLVM_VERSION >= 40000
                 const DataLayout &DL = jl_data_layout;
-#else
-                const DataLayout &DL = jl_ExecutionEngine->getDataLayout();
-#endif
                 uint64_t sz = DL.getTypeStoreSize(T);
                 emit_memcpy(ctx, ssaslot, tbaa_stack, vi.value, sz, al);
             }
@@ -3791,6 +3789,12 @@ static void emit_stmtpos(jl_codectx_t &ctx, jl_value_t *expr, int ssaval_result)
         ctx.builder.CreateCall(prepare_call(jlleave_func),
                            ConstantInt::get(T_int32, jl_unbox_long(args[0])));
     }
+    else if (head == pop_exception_sym) {
+        jl_cgval_t excstack_state = emit_expr(ctx, jl_exprarg(expr, 0));
+        assert(excstack_state.V && excstack_state.V->getType() == T_size);
+        ctx.builder.CreateCall(prepare_call(jl_restore_excstack_func), excstack_state.V);
+        return;
+    }
     else {
         if (!jl_is_method(ctx.linfo->def.method)) {
             // TODO: inference is invalid if this has an effect
@@ -3802,6 +3806,8 @@ static void emit_stmtpos(jl_codectx_t &ctx, jl_value_t *expr, int ssaval_result)
     }
 }
 
+// `expr` is not clobbered in JL_TRY
+JL_GCC_IGNORE_START("-Wclobbered")
 static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
 {
     if (jl_is_symbol(expr)) {
@@ -3943,8 +3949,7 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
                 bnd = jl_get_binding_for_method_def(mod, (jl_sym_t*)mn);
             }
             JL_CATCH {
-                jl_ptls_t ptls = jl_get_ptls_states();
-                jl_value_t *e = ptls->exception_in_transit;
+                jl_value_t *e = jl_current_exception();
                 // errors. boo. root it somehow :(
                 bnd = jl_get_binding_wr(ctx.module, (jl_sym_t*)jl_gensym(), 1);
                 bnd->value = e;
@@ -4013,9 +4018,9 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
         Value *val = emit_jlcall(ctx, jlnew_func, typ, &argv[1], nargs - 1);
         return mark_julia_type(ctx, val, true, ty);
     }
-    else if (head == exc_sym) { // *ptls->exception_in_transit
+    else if (head == exc_sym) {
         return mark_julia_type(ctx,
-                ctx.builder.CreateLoad(emit_exc_in_transit(ctx), /*isvolatile*/true),
+                ctx.builder.CreateCall(prepare_call(jl_current_exception_func)),
                 true, jl_any_type);
     }
     else if (head == copyast_sym) {
@@ -4043,6 +4048,9 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
     }
     else if (head == leave_sym) {
         jl_error("Expr(:leave) in value position");
+    }
+    else if (head == pop_exception_sym) {
+        jl_error("Expr(:pop_exception) in value position");
     }
     else if (head == enter_sym) {
         jl_error("Expr(:enter) in value position");
@@ -4111,6 +4119,7 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
     }
     return jl_cgval_t();
 }
+JL_GCC_IGNORE_STOP
 
 // --- generate function bodies ---
 
@@ -4270,11 +4279,7 @@ static Function* gen_cfun_wrapper(
         M = new Module(name, jl_LLVMContext);
         jl_setup_module(M);
     }
-#if JL_LLVM_VERSION >= 50000
     AttributeList attributes = sig.attributes;
-#else
-    AttributeSet attributes = sig.attributes;
-#endif
     FunctionType *functype;
     if (nest) {
         // add nest parameter (pointer to jl_value_t* data array) after sret arg
@@ -4895,15 +4900,14 @@ static Function *jl_cfunction_object(jl_value_t *ff, jl_value_t *declrt, jl_tupl
     // first split on `ft` using a simple eqtable
     // then use the typemap to split on argt
     // and finally, pick declrt from the pair-list
-    union jl_typemap_t cache_l2 = { NULL };
-    // cache_l2.unknown = NULL;
+    jl_typemap_t *cache_l2 = NULL;
     jl_typemap_entry_t *cache_l3 = NULL;
     if (!jl_cfunction_list) {
         jl_cfunction_list = jl_alloc_vec_any(16);
     }
     else {
-        cache_l2.unknown = jl_eqtable_get(jl_cfunction_list, ft, NULL);
-        if (cache_l2.unknown) {
+        cache_l2 = jl_eqtable_get(jl_cfunction_list, ft, NULL);
+        if (cache_l2) {
             cache_l3 = jl_typemap_assoc_by_type(cache_l2, (jl_value_t*)argt, NULL,
                 /*subtype*/0, /*offs*/0, /*world*/1, /*max_world_mask*/0);
             if (cache_l3) {
@@ -4920,13 +4924,13 @@ static Function *jl_cfunction_object(jl_value_t *ff, jl_value_t *declrt, jl_tupl
     }
 
     if (cache_l3 == NULL) {
-        union jl_typemap_t insert = cache_l2;
-        if (!insert.unknown)
-            insert.unknown = jl_nothing;
-        cache_l3 = jl_typemap_insert(&insert, (jl_value_t*)insert.unknown, (jl_tupletype_t*)argt,
+        jl_typemap_t *insert = cache_l2;
+        if (!insert)
+            insert = jl_nothing;
+        cache_l3 = jl_typemap_insert(&insert, (jl_value_t*)insert, (jl_tupletype_t*)argt,
             NULL, jl_emptysvec, (jl_value_t*)jl_emptysvec, /*offs*/0, &cfunction_cache, 1, ~(size_t)0, NULL);
-        if (insert.unknown != cache_l2.unknown)
-            jl_cfunction_list = jl_eqtable_put(jl_cfunction_list, ft, insert.unknown, NULL);
+        if (insert != cache_l2)
+            jl_cfunction_list = jl_eqtable_put(jl_cfunction_list, ft, insert, NULL);
     }
 
     // compute / validate return type
@@ -5168,11 +5172,7 @@ static jl_returninfo_t get_specsig_function(Module *M, const std::string &name, 
             rt = T_prjlvalue;
         }
     }
-#if JL_LLVM_VERSION >= 50000
     AttributeList attributes; // function declaration attributes
-#else
-    AttributeSet attributes; // function declaration attributes
-#endif
     if (props.cc == jl_returninfo_t::SRet) {
         attributes = attributes.addAttribute(jl_LLVMContext, 1, Attribute::StructRet);
         attributes = attributes.addAttribute(jl_LLVMContext, 1, Attribute::NoAlias);
@@ -5445,13 +5445,7 @@ static std::unique_ptr<Module> emit_function(
     // i686 Windows (which uses a 4-byte-aligned stack)
     AttrBuilder *attr = new AttrBuilder();
     attr->addStackAlignmentAttr(16);
-#if JL_LLVM_VERSION >= 50000
     f->addAttributes(AttributeList::FunctionIndex, *attr);
-#else
-    f->addAttributes(AttributeSet::FunctionIndex,
-        AttributeSet::get(f->getContext(),
-            AttributeSet::FunctionIndex, *attr));
-#endif
 #endif
 #if defined(_OS_WINDOWS_) && defined(_CPU_X86_64_)
     f->setHasUWTable(); // force NeedsWinEH
@@ -5485,12 +5479,7 @@ static std::unique_ptr<Module> emit_function(
     if (ctx.debug_enabled) {
         // TODO: Fix when moving to new LLVM version
         topfile = dbuilder.createFile(filename, ".");
-#if JL_LLVM_VERSION >= 40000
         DICompileUnit *CU = dbuilder.createCompileUnit(0x01, topfile, "julia", true, "", 0);
-#else
-        DICompileUnit *CU = dbuilder.createCompileUnit(0x01, filename, ".", "julia", true, "", 0);
-#endif
-
         DISubroutineType *subrty;
         if (jl_options.debug_level <= 1) {
             subrty = jl_di_func_null_sig;
@@ -5666,11 +5655,7 @@ static std::unique_ptr<Module> emit_function(
             specsig || // for arguments, give them stack slots if they aren't in `argArray` (otherwise, will use that pointer)
             (va && (int)i == ctx.vaSlot) || // or it's the va arg tuple
             i == 0) { // or it is the first argument (which isn't in `argArray`)
-#if JL_LLVM_VERSION >= 50000
             AllocaInst *av = new AllocaInst(T_prjlvalue, 0,
-#else
-            AllocaInst *av = new AllocaInst(T_prjlvalue,
-#endif
                 jl_symbol_name(s), /*InsertBefore*/ctx.ptlsStates);
             StoreInst *SI = new StoreInst(
                 ConstantPointerNull::get(cast<PointerType>(T_prjlvalue)), av,
@@ -5790,11 +5775,7 @@ static std::unique_ptr<Module> emit_function(
                     if (ctx.debug_enabled && vi.dinfo && !vi.boxroot && !vi.value.V) {
                         SmallVector<uint64_t, 8> addr;
                         addr.push_back(llvm::dwarf::DW_OP_deref);
-#if JL_LLVM_VERSION >= 50000
                         addr.push_back(llvm::dwarf::DW_OP_plus_uconst);
-#else
-                        addr.push_back(llvm::dwarf::DW_OP_plus);
-#endif
                         addr.push_back((i - 1) * sizeof(void*));
                         if ((Metadata*)vi.dinfo->getType() != jl_pvalue_dillvmt)
                             addr.push_back(llvm::dwarf::DW_OP_deref);
@@ -6025,7 +6006,7 @@ static std::unique_ptr<Module> emit_function(
 
     // First go through and collect all branch targets, so we know where to
     // split basic blocks.
-    std::set<int> branch_targets;
+    std::set<int> branch_targets; // 1-indexed
     {
         for (size_t i = 0; i < stmtslen; ++i) {
             jl_value_t *stmt = jl_array_ptr_ref(stmts, i);
@@ -6057,6 +6038,13 @@ static std::unique_ptr<Module> emit_function(
                 branch_targets.insert(dest);
                 if (i + 2 <= stmtslen)
                     branch_targets.insert(i + 2);
+            } else if (jl_is_phinode(stmt)) {
+                jl_array_t *edges = (jl_array_t*)jl_fieldref_noalloc(stmt, 0);
+                for (size_t j = 0; j < jl_array_len(edges); ++j) {
+                    size_t edge = jl_unbox_long(jl_array_ptr_ref(edges, j));
+                    if (edge == i)
+                        branch_targets.insert(i + 1);
+                }
             }
         }
     }
@@ -6224,6 +6212,13 @@ static std::unique_ptr<Module> emit_function(
 
             assert(jl_is_long(args[0]));
             int lname = jl_unbox_long(args[0]);
+            // Save exception stack depth at enter for use in pop_exception
+            Value *excstack_state =
+                ctx.builder.CreateCall(prepare_call(jl_excstack_state_func));
+            assert(!ctx.ssavalue_assigned.at(cursor));
+            ctx.SAvalues.at(cursor) = jl_cgval_t(excstack_state, NULL, false,
+                                                 (jl_value_t*)jl_ulong_type, NULL);
+            ctx.ssavalue_assigned.at(cursor) = true;
             CallInst *sj = ctx.builder.CreateCall(prepare_call(except_enter_func));
             // We need to mark this on the call site as well. See issue #6757
             sj->setCanReturnTwice();
@@ -6233,21 +6228,7 @@ static std::unique_ptr<Module> emit_function(
             handlr = BB[lname];
             workstack.push_back(lname - 1);
             come_from_bb[cursor + 1] = ctx.builder.GetInsertBlock();
-#ifdef _OS_WINDOWS_
-            BasicBlock *cond_resetstkoflw_blk = BasicBlock::Create(jl_LLVMContext, "cond_resetstkoflw", f);
-            BasicBlock *resetstkoflw_blk = BasicBlock::Create(jl_LLVMContext, "resetstkoflw", f);
-            ctx.builder.CreateCondBr(isz, tryblk, cond_resetstkoflw_blk);
-            ctx.builder.SetInsertPoint(cond_resetstkoflw_blk);
-            ctx.builder.CreateCondBr(ctx.builder.CreateICmpEQ(
-                                     maybe_decay_untracked(literal_pointer_val(ctx, jl_stackovf_exception)),
-                                     ctx.builder.CreateLoad(emit_exc_in_transit(ctx), /*isvolatile*/true)),
-                                 resetstkoflw_blk, handlr);
-            ctx.builder.SetInsertPoint(resetstkoflw_blk);
-            ctx.builder.CreateCall(prepare_call(resetstkoflw_func), {});
-            ctx.builder.CreateBr(handlr);
-#else
             ctx.builder.CreateCondBr(isz, tryblk, handlr);
-#endif
             ctx.builder.SetInsertPoint(tryblk);
         }
         else {
@@ -6392,6 +6373,7 @@ static std::unique_ptr<Module> emit_function(
                     }
                 }
                 assert(found);
+                (void)found;
             }
             else {
                 terminator->removeFromParent();
@@ -7046,6 +7028,7 @@ static void init_julia_llvm_env(Module *m)
     builtin_func_map[jl_f_fieldtype] = jlcall_func_to_llvm("jl_f_fieldtype", &jl_f_fieldtype, m);
     builtin_func_map[jl_f_nfields] = jlcall_func_to_llvm("jl_f_nfields", &jl_f_nfields, m);
     builtin_func_map[jl_f__expr] = jlcall_func_to_llvm("jl_f__expr", &jl_f__expr, m);
+    builtin_func_map[jl_f__typevar] = jlcall_func_to_llvm("jl_f__typevar", &jl_f__typevar, m);
     builtin_func_map[jl_f_arrayref] = jlcall_func_to_llvm("jl_f_arrayref", &jl_f_arrayref, m);
     builtin_func_map[jl_f_arrayset] = jlcall_func_to_llvm("jl_f_arrayset", &jl_f_arrayset, m);
     builtin_func_map[jl_f_arraysize] = jlcall_func_to_llvm("jl_f_arraysize", &jl_f_arraysize, m);
@@ -7137,10 +7120,13 @@ static void init_julia_llvm_env(Module *m)
                          "jl_enter_handler", m);
     add_named_global(jlenter_func, &jl_enter_handler);
 
+    jl_current_exception_func =
+        Function::Create(FunctionType::get(T_prjlvalue, false),
+                         Function::ExternalLinkage,
+                         "jl_current_exception", m);
+    add_named_global(jl_current_exception_func, &jl_current_exception);
+
 #ifdef _OS_WINDOWS_
-    resetstkoflw_func = Function::Create(FunctionType::get(T_int32, false),
-            Function::ExternalLinkage, "_resetstkoflw", m);
-    add_named_global(resetstkoflw_func, &_resetstkoflw);
 #if defined(_CPU_X86_64_)
     juliapersonality_func = Function::Create(FunctionType::get(T_int32, true),
             Function::ExternalLinkage, "__julia_personality", m);
@@ -7178,6 +7164,18 @@ static void init_julia_llvm_env(Module *m)
                          Function::ExternalLinkage,
                          "jl_pop_handler", m);
     add_named_global(jlleave_func, &jl_pop_handler);
+
+    jl_restore_excstack_func =
+        Function::Create(FunctionType::get(T_void, T_size, false),
+                         Function::ExternalLinkage,
+                         "jl_restore_excstack", m);
+    add_named_global(jl_restore_excstack_func, &jl_restore_excstack);
+
+    jl_excstack_state_func =
+        Function::Create(FunctionType::get(T_size, false),
+                         Function::ExternalLinkage,
+                         "jl_excstack_state", m);
+    add_named_global(jl_excstack_state_func, &jl_excstack_state);
 
     std::vector<Type *> args_2vals_callee_rooted(0);
     args_2vals_callee_rooted.push_back(PointerType::get(T_jlvalue, AddressSpace::CalleeRooted));
@@ -7416,8 +7414,6 @@ extern "C" void *jl_init_llvm(void)
         // Make sure we are using the large code model on 64bit
         // Let LLVM pick a default suitable for jitting on 32bit
         .setCodeModel(CodeModel::Large)
-#elif JL_LLVM_VERSION < 60000
-        .setCodeModel(CodeModel::JITDefault)
 #endif
 #ifdef DISABLE_OPT
         .setOptLevel(CodeGenOpt::None)
@@ -7464,11 +7460,14 @@ extern "C" void *jl_init_llvm(void)
     init_julia_llvm_meta();
     jl_ExecutionEngine = new JuliaOJIT(*jl_TargetMachine);
 
-// Mark our address spaces as non-integral
-#if JL_LLVM_VERSION >= 40000
+    // Mark our address spaces as non-integral
     jl_data_layout = jl_ExecutionEngine->getDataLayout();
     std::string DL = jl_data_layout.getStringRepresentation() + "-ni:10:11:12:13";
     jl_data_layout.reset(DL);
+
+// Register GDB event listener
+#ifdef JL_DEBUG_BUILD
+    jl_ExecutionEngine->RegisterJITEventListener(JITEventListener::createGDBRegistrationListener());
 #endif
 
 #ifdef JL_USE_INTEL_JITEVENTS

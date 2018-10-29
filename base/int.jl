@@ -579,9 +579,18 @@ end
     @big_str str
     @big_str(str)
 
-`@big_str` parses a string into a BigInt
-Throws an `ArgumentError` if the string is not a valid integer
-Removes all underscores `_` from the string
+Parse a string into a [`BigInt`](@ref) or [`BigFloat`](@ref),
+and throw an `ArgumentError` if the string is not a valid number.
+For integers `_` is allowed in the string as a separator.
+
+# Examples
+```jldoctest
+julia> big"123_456"
+123456
+
+julia> big"7891.5"
+7.8915e+03
+```
 """
 macro big_str(s)
     if '_' in s
@@ -622,9 +631,6 @@ promote_rule(::Type{UInt16},  ::Type{Int16} ) = UInt16
 promote_rule(::Type{UInt32},  ::Type{Int32} ) = UInt32
 promote_rule(::Type{UInt64},  ::Type{Int64} ) = UInt64
 promote_rule(::Type{UInt128}, ::Type{Int128}) = UInt128
-
-_default_type(::Type{Unsigned}) = UInt
-_default_type(::Union{Type{Integer},Type{Signed}}) = Int
 
 ## traits ##
 

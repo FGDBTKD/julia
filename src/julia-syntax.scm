@@ -160,21 +160,11 @@
                    (let ((meta (take-while (lambda (x) (and (pair? x)
                                                             (memq (car x) '(line meta))))
                                            (cdr body)))
-                         (val (last body)))
-                     ;; wrap one-liners in `convert` instead of adding an ssavalue
-                     (if (and (length= (cdr body) (+ 1 (length meta)))
-                              (not (expr-contains-p return? (if (return? val)
-                                                                (cadr val)
-                                                                val))))
-                         `(,(car body) ,@meta
-                           ,(if (return? val)
-                                `(return ,(convert-for-type-decl (cadr val) rett))
-                                (convert-for-type-decl val rett)))
-                         (let ((R (make-ssavalue)))
-                           `(,(car body) ,@meta
-                             (= ,R ,rett)
-                             (meta ret-type ,R)
-                             ,@(list-tail body (+ 1 (length meta))))))))))))
+                         (R (make-ssavalue)))
+                     `(,(car body) ,@meta
+                       (= ,R ,rett)
+                       (meta ret-type ,R)
+                       ,@(list-tail body (+ 1 (length meta))))))))))
 
 ;; convert x<:T<:y etc. exprs into (name lower-bound upper-bound)
 ;; a bound is #f if not specified
@@ -200,9 +190,17 @@
   (let ((bounds (map analyze-typevar params)))
     (values (map car bounds) bounds)))
 
+(define (unmangled-name v)
+  (if (eq? v '||)
+      v
+      (let ((s (string v)))
+        (if (eqv? (string.char s 0) #\#)
+            (symbol (last (string-split s "#")))
+            v))))
+
 ;; construct expression to allocate a TypeVar
-(define (bounds-to-TypeVar v)
-  (let ((v  (car v))
+(define (bounds-to-TypeVar v (unmangle #f))
+  (let ((v  ((if unmangle unmangled-name identity) (car v)))
         (lb (cadr v))
         (ub (caddr v)))
     `(call (core TypeVar) ',v
@@ -684,7 +682,7 @@
                             ,@(map make-decl field-names field-types))
                       (block
                        ,@locs
-                       (new ,name ,@field-names))))
+                       (new (outerref ,name) ,@field-names))))
          any-ctor)
         (list any-ctor))))
 
@@ -836,7 +834,7 @@
         (block
          (global ,name) (const ,name)
          ,@(map (lambda (v) `(local ,v)) params)
-         ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v))) params bounds)
+         ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v #t))) params bounds)
          (struct_type ,name (call (core svec) ,@params)
                       (call (core svec) ,@(map quotify field-names))
                       ,super (call (core svec) ,@field-types) ,mut ,min-initialized)))
@@ -877,7 +875,7 @@
      (scope-block
       (block
        ,@(map (lambda (v) `(local ,v)) params)
-       ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v))) params bounds)
+       ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v #t))) params bounds)
        (abstract_type ,name (call (core svec) ,@params) ,super))))))
 
 (define (primitive-type-def-expr n name params super)
@@ -888,7 +886,7 @@
      (scope-block
       (block
        ,@(map (lambda (v) `(local ,v)) params)
-       ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v))) params bounds)
+       ,@(map (lambda (n v) (make-assignment n (bounds-to-TypeVar v #t))) params bounds)
        (primitive_type ,name (call (core svec) ,@params) ,n ,super))))))
 
 ;; take apart a type signature, e.g. T{X} <: S{Y}
@@ -1591,7 +1589,7 @@
                    (car ranges)
                    `(call (top product) ,@ranges)))
          (iter (if filt?
-                   `(call (|.| (top Iterators) 'Filter)
+                   `(call (top Filter)
                           ,(func-for-generator-ranges (cadr (caddr e)) range-exprs #f '())
                           ,iter)
                    iter))
@@ -1632,7 +1630,7 @@
              (kws (car kws+args))
              (kws (if (null? kws) kws (list (cons 'parameters kws))))
              (args (map dot-to-fuse (cdr kws+args)))
-             (make `(call (|.| (top Broadcast) ,(if (null? kws) ''broadcasted ''broadcasted_kwsyntax)) ,@kws ,f ,@args)))
+             (make `(call (top ,(if (null? kws) 'broadcasted 'broadcasted_kwsyntax)) ,@kws ,f ,@args)))
         (if top (cons 'fuse make) make)))
     (if (and (pair? e) (eq? (car e) '|.|))
         (let ((f (cadr e)) (x (caddr e)))
@@ -1657,12 +1655,13 @@
     (if (fuse? e)
         ; expanded to a fuse op call
         (if (null? lhs)
-            (expand-forms `(call (|.| (top Broadcast) 'materialize) ,(cdr e)))
-            (expand-forms `(call (|.| (top Broadcast) 'materialize!) ,lhs-view ,(cdr e))))
+            (expand-forms `(call (top materialize) ,(cdr e)))
+            (expand-forms `(call (top materialize!) ,lhs-view ,(cdr e))))
         ; expanded to something else (like a getfield)
         (if (null? lhs)
             (expand-forms e)
-            (expand-forms `(call (|.| (top Broadcast) 'materialize!) ,lhs-view (call (|.| (top Broadcast) 'broadcasted) (top identity) ,e)))))))
+            (expand-forms `(call (top materialize!) ,lhs-view
+                                 (call (top broadcasted) (top identity) ,e)))))))
 
 
 (define (expand-where body var)
@@ -1908,16 +1907,19 @@
                                     (ssavalue? x))
                                 x (make-ssavalue)))
                        (ini (if (eq? x xx) '() `((= ,xx ,(expand-forms x)))))
+                       (n   (length lhss))
                        (st  (gensy)))
                   `(block
                     ,@ini
                     ,.(map (lambda (i lhs)
                              (expand-forms
                               (lower-tuple-assignment
-                               (list lhs st)
+                               (if (= i (- n 1))
+                                   (list lhs)
+                                   (list lhs st))
                                `(call (top indexed_iterate)
                                       ,xx ,(+ i 1) ,.(if (eq? i 0) '() `(,st))))))
-                           (iota (length lhss))
+                           (iota n)
                            lhss)
                     (unnecessary ,xx))))))
          ((typed_hcat)
@@ -2422,7 +2424,7 @@
          '(null))
         ((eq? (car e) 'require-existing-local)
          (if (not (memq (cadr e) env))
-             (error "no outer variable declaration exists for \"for outer\""))
+             (error "no outer local variable declaration exists for \"for outer\""))
          '(null))
         ((eq? (car e) 'lambda)
          (let* ((lv   (lam:vars e))
@@ -2739,12 +2741,37 @@ f(x) = yt(x)
         ,(delete-duplicates (append (lam:sp lam) capt-sp)))
       ,body)))
 
+;; renumber ssavalues assigned in an expr, allowing it to be repeated
+(define (renumber-assigned-ssavalues e)
+  (let ((vals (expr-find-all (lambda (x) (and (assignment? x) (ssavalue? (cadr x))))
+                             e
+                             cadadr)))
+    (if (null? vals)
+        e
+        (let ((repl (table)))
+          (for-each (lambda (id) (put! repl id (make-ssavalue)))
+                    vals)
+          (let do-replace ((x e))
+            (if (or (atom? x) (quoted? x))
+                x
+                (if (eq? (car x) 'ssavalue)
+                    (or (get repl (cadr x) #f) x)
+                    (cons (car x)
+                          (map do-replace (cdr x))))))))))
+
 (define (convert-for-type-decl rhs t)
   (if (equal? t '(core Any))
       rhs
-      `(call (core typeassert)
-             (call (top convert) ,t ,rhs)
-             ,t)))
+      (let* ((temp (if (or (atom? t) (ssavalue? t) (quoted? t))
+                       #f
+                       (make-ssavalue)))
+             (ty   (or temp t))
+             (ex   `(call (core typeassert)
+                          (call (top convert) ,ty ,rhs)
+                          ,ty)))
+        (if temp
+            `(block (= ,temp ,(renumber-assigned-ssavalues t)) ,ex)
+            ex))))
 
 ;; convert assignment to a closed variable to a setfield! call.
 ;; while we're at it, generate `convert` calls for variables with
@@ -3370,13 +3397,14 @@ f(x) = yt(x)
         (arg-map #f)          ;; map arguments to new names if they are assigned
         (label-counter 0)     ;; counter for generating label addresses
         (label-map (table))   ;; maps label names to generated addresses
-        (label-level (table)) ;; exception handler level of each label
+        (label-nesting (table)) ;; exception handler and catch block nesting of each label
         (finally-handler #f)  ;; `(var label map level)` where `map` is a list of `(tag . action)`.
                               ;; to exit the current finally block, set `var` to integer `tag`,
                               ;; jump to `label`, and put `(tag . action)` in the map, where `action`
                               ;; is `(return x)`, `(break x)`, or a call to rethrow.
         (handler-goto-fixups '())  ;; `goto`s that might need `leave` exprs added
-        (handler-level 0))  ;; exception handler nesting depth
+        (handler-level 0)     ;; exception handler nesting depth
+        (catch-token-stack '())) ;; tokens identifying handler enter for current catch blocks
     (define (emit c)
       (set! code (cons c code)))
     (define (make-label)
@@ -3399,6 +3427,16 @@ f(x) = yt(x)
             (begin (emit `(leave ,(+ 1 (- handler-level (cadddr finally-handler)))))
                    (emit `(goto ,(cadr finally-handler)))))
         tag))
+    (define (pop-exc-expr src-tokens dest-tokens)
+      (if (eq? src-tokens dest-tokens)
+          #f
+          (let ((restore-token (let loop ((s src-tokens))
+                                 (if (not (pair? s))
+                                     (error "Attempt to jump into catch block"))
+                                 (if (eq? (cdr s) dest-tokens)
+                                     (car s)
+                                     (loop (cdr s))))))
+            `(pop_exception ,restore-token))))
     (define (emit-return x)
       (define (actually-return x)
         (let* ((x   (if rett
@@ -3406,6 +3444,8 @@ f(x) = yt(x)
                         x))
                (tmp (if (valid-ir-return? x) #f (make-ssavalue))))
           (if tmp (emit `(= ,tmp ,x)))
+          (let ((pexc (pop-exc-expr catch-token-stack '())))
+            (if pexc (emit pexc)))
           (emit `(return ,(or tmp x)))))
       (if x
           (if (> handler-level 0)
@@ -3420,10 +3460,13 @@ f(x) = yt(x)
                 (or tmp x))
               (actually-return x))))
     (define (emit-break labl)
-      (let ((lvl (caddr labl)))
+      (let ((lvl (caddr labl))
+            (dest-tokens (cadddr labl)))
         (if (and finally-handler (> (cadddr finally-handler) lvl))
             (leave-finally-block `(break ,labl))
             (begin
+              (let ((pexc (pop-exc-expr catch-token-stack dest-tokens)))
+                (if pexc (emit pexc)))
               (if (> handler-level lvl)
                   (emit `(leave ,(- handler-level lvl))))
               (emit `(goto ,(cadr labl)))))))
@@ -3658,7 +3701,7 @@ f(x) = yt(x)
             ((break-block)
              (let ((endl (make-label)))
                (compile (caddr e)
-                        (cons (list (cadr e) endl handler-level)
+                        (cons (list (cadr e) endl handler-level catch-token-stack)
                               break-labels)
                         #f #f)
                (mark-label endl))
@@ -3670,9 +3713,9 @@ f(x) = yt(x)
                    (emit-break labl))))
             ((label symboliclabel)
              (if (eq? (car e) 'symboliclabel)
-                 (if (has? label-level (cadr e))
+                 (if (has? label-nesting (cadr e))
                      (error (string "label \"" (cadr e) "\" defined multiple times"))
-                     (put! label-level (cadr e) handler-level)))
+                     (put! label-nesting (cadr e) (list handler-level catch-token-stack))))
              (let ((m (get label-map (cadr e) #f)))
                (if m
                    (emit `(label ,m))
@@ -3688,27 +3731,31 @@ f(x) = yt(x)
                (emit `(null))  ;; save space for `leave` that might be needed
                (emit `(goto ,m))
                (set! handler-goto-fixups
-                     (cons (list code handler-level (cadr e)) handler-goto-fixups))
+                     (cons (list code handler-level catch-token-stack (cadr e)) handler-goto-fixups))
                #f))
 
             ;; exception handlers are lowered using
-            ;; (enter L) - push handler with catch block at label L
+            ;; (= tok (enter L)) - push handler with catch block at label L, yielding token
             ;; (leave n) - pop N exception handlers
+            ;; (pop_exception tok) - pop exception stack back to state of associated enter
             ((trycatch tryfinally)
-             (let ((catch (make-label))
+             (let ((handler-token (make-ssavalue))
+                   (catch (make-label))
                    (endl  (make-label))
                    (last-finally-handler finally-handler)
                    (finally           (if (eq? (car e) 'tryfinally) (new-mutable-var) #f))
                    (finally-exception (if (eq? (car e) 'tryfinally) (new-mutable-var) #f))
                    (my-finally-handler #f))
-               (emit `(enter ,catch))
+               ;; handler block entry
+               (emit `(= ,handler-token (enter ,catch)))
                (set! handler-level (+ handler-level 1))
                (if finally (begin (set! my-finally-handler (list finally endl '() handler-level))
                                   (set! finally-handler my-finally-handler)
                                   (emit `(= ,finally -1))))
-               (let* ((v1  (compile (cadr e) break-labels value #f))
+               (let* ((v1  (compile (cadr e) break-labels value #f)) ;; emit try block code
                       (val (if (and value (not tail))
                                (new-mutable-var) #f)))
+                 ;; handler block postfix
                  (if (and val v1) (emit-assignment val v1))
                  (if tail
                      (begin (if v1 (emit-return v1))
@@ -3716,19 +3763,15 @@ f(x) = yt(x)
                      (begin (emit '(leave 1))
                             (emit `(goto ,endl))))
                  (set! handler-level (- handler-level 1))
+                 ;; emit either catch or finally block
                  (mark-label catch)
                  (emit `(leave 1))
                  (if finally
-                     (begin (emit `(= ,finally-exception (the_exception)))
-                            (leave-finally-block `(foreigncall 'jl_rethrow_other (top Bottom) (call (core svec) Any)
-                                                               'ccall 1 ,finally-exception)
-                                                 #f))
-                     (let ((v2 (compile (caddr e) break-labels value tail)))
-                       (if val (emit-assignment val v2))))
-                 (if endl (mark-label endl))
-                 (if finally
-                     (begin (set! finally-handler last-finally-handler)
+                     (begin (leave-finally-block '(call rethrow) #f)
+                            (if endl (mark-label endl))
+                            (set! finally-handler last-finally-handler)
                             (compile (caddr e) break-labels #f #f)
+                            ;; emit actions to be taken at exit of finally block
                             (let loop ((actions (caddr my-finally-handler)))
                               (if (pair? actions)
                                   (let ((skip (if (and tail (null? (cdr actions))
@@ -3745,7 +3788,14 @@ f(x) = yt(x)
                                             (else ;; assumed to be a rethrow
                                              (emit ac))))
                                     (if skip (mark-label skip))
-                                    (loop (cdr actions)))))))
+                                    (loop (cdr actions))))))
+                     (begin (set! catch-token-stack (cons handler-token catch-token-stack))
+                            (let ((v2 (compile (caddr e) break-labels value tail)))
+                              (if val (emit-assignment val v2))
+                              (if (not tail) (emit `(pop_exception ,handler-token)))
+                                             ;; else done in emit-return from compile
+                              (if endl (mark-label endl)))
+                            (set! catch-token-stack (cdr catch-token-stack))))
                  val)))
 
             ((newvar)
@@ -3883,16 +3933,20 @@ f(x) = yt(x)
     (for-each (lambda (x)
                 (let ((point (car x))
                       (hl    (cadr x))
-                      (lab   (caddr x)))
-                  (let ((target-level (get label-level lab #f)))
-                    (cond ((not target-level)
-                           (error (string "label \"" lab "\" referenced but not defined")))
-                          ((> target-level hl)
-                           (error (string "cannot goto label \"" lab "\" inside try/catch block")))
-                          ((= target-level hl)
-                           (set-cdr! point (cddr point))) ;; remove empty slot
-                          (else
-                           (set-car! (cdr point) `(leave ,(- hl target-level))))))))
+                      (src-tokens (caddr x))
+                      (lab   (cadddr x)))
+                  (let ((target-nesting (get label-nesting lab #f)))
+                    (if (not target-nesting)
+                        (error (string "label \"" lab "\" referenced but not defined")))
+                    (let ((target-level (car target-nesting)))
+                      (cond ((> target-level hl)
+                            (error (string "cannot goto label \"" lab "\" inside try/catch block")))
+                            ((= target-level hl)
+                             (set-cdr! point (cddr point))) ;; remove empty slot
+                            (else
+                             (set-car! (cdr point) `(leave ,(- hl target-level))))))
+                    (let ((pexc (pop-exc-expr src-tokens (cadr target-nesting))))
+                      (if pexc (set-cdr! point (cons pexc (cdr point))))))))
               handler-goto-fixups)
     (if global-const-error
         (error (string "`global const` delcaration not allowed inside function" (format-loc global-const-error))))
@@ -3940,12 +3994,14 @@ f(x) = yt(x)
                      (let ((vinf (var-info-for (cadr e) vi)))
                        (if (and vinf (not (vinfo:capt vinf)))
                            (put! vars (cadr e) #t))))
+                    ((and (pair? e) (or (memq (car e) '(goto gotoifnot))
+                                        (and (eq? (car e) '=) (pair? (caddr e))
+                                             (eq? (car (caddr e)) 'enter))))
+                     (set! vars (table)))
                     ((and (pair? e) (eq? (car e) '=))
                      (if (has? vars (cadr e))
                          (begin (del! vars (cadr e))
-                                (put! di (cadr e) #t))))
-                    ((and (pair? e) (memq (car e) '(goto gotoifnot enter)))
-                     (set! vars (table)))))
+                                (put! di (cadr e) #t))))))
             (loop (cdr stmts)))))))
 
 ;; pass 6: renumber slots and labels

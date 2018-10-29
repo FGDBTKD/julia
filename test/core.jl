@@ -141,6 +141,8 @@ end
 @test typejoin(Tuple{Vararg{Int,2}}, Tuple{Int,Int,Int}) === Tuple{Int,Int,Vararg{Int}}
 @test typejoin(Tuple{Vararg{Int,2}}, Tuple{Vararg{Int}}) === Tuple{Vararg{Int}}
 
+@test typejoin(NTuple{3,Tuple}, NTuple{2,T} where T) == Tuple{Any,Any,Vararg{Tuple}}
+
 # issue #26321
 struct T26321{N,S<:NTuple{N}}
     t::S
@@ -1078,13 +1080,13 @@ let
     @test getfield(strct, 3) == "bad"
 
     mstrct = TestMutable("melm", 1, nothing)
-    Base.setproperty!(mstrct, :line, 8.0)
+    @test Base.setproperty!(mstrct, :line, 8.0) === 8
     @test mstrct.line === 8
     @test_throws TypeError(:setfield!, "", Int, 8.0) setfield!(mstrct, :line, 8.0)
     @test_throws TypeError(:setfield!, "", Int, 8.0) setfield!(mstrct, 2, 8.0)
-    setfield!(mstrct, 3, "hi")
+    @test setfield!(mstrct, 3, "hi") == "hi"
     @test mstrct.error == "hi"
-    setfield!(mstrct, 1, "yo")
+    @test setfield!(mstrct, 1, "yo") == "yo"
     @test mstrct.file == "yo"
     @test_throws BoundsError(mstrct, 10) getfield(mstrct, 10)
     @test_throws BoundsError(mstrct, 0) setfield!(mstrct, 0, "")
@@ -1096,7 +1098,7 @@ function Base.getproperty(mstrct::TestMutable, p::Symbol)
     return (p, getfield(mstrct, :error))
 end
 function Base.setproperty!(mstrct::TestMutable, p::Symbol, v)
-    setfield!(mstrct, :error, (p, v))
+    return setfield!(mstrct, :error, (p, v))
 end
 
 let
@@ -1114,6 +1116,20 @@ let
     @test mstrct.bar === (:bar, (:line, 8.0))
     @test mstrct.error === (:error, (:line, 8.0))
 end
+
+struct S29761
+    x
+end
+function S29761_world(i)
+    x = S29761(i)
+    @eval function Base.getproperty(x::S29761, sym::Symbol)
+        return sym => getfield(x, sym)
+    end
+    # ensure world updates are handled correctly for simple x.y expressions:
+    return x.x, @eval($x.x), x.x
+end
+@test S29761_world(1) == (1, :x => 1, 1)
+
 
 # allow typevar in Union to match as long as the arguments contain
 # sufficient information
@@ -2262,15 +2278,18 @@ a7652 = A7652(0)
 t_a7652 = A7652
 f7652() = fieldtype(t_a7652, :a) <: Int
 @test f7652() == (fieldtype(A7652, :a) <: Int) == true
+
 g7652() = fieldtype(DataType, :types)
 @test g7652() == fieldtype(DataType, :types) == Core.SimpleVector
 @test fieldtype(t_a7652, 1) == Int
+
 h7652() = setfield!(a7652, 1, 2)
-h7652()
-@test a7652.a == 2
+@test h7652() === 2
+@test a7652.a === 2
+
 i7652() = Base.setproperty!(a7652, :a, 3.0)
-i7652()
-@test a7652.a == 3
+@test i7652() === 3
+@test a7652.a === 3
 
 # issue #7679
 @test map(f->f(), Any[ ()->i for i=1:3 ]) == Any[1,2,3]
@@ -2511,16 +2530,20 @@ mutable struct Obj; x; end
         x = Obj(1)
         push!(r, x)
         push!(wr, WeakRef(x))
+        nothing
     end
-    test_wr(r,wr) = @test r[1] == wr[1].value
+    @noinline test_wr(r, wr) = @test r[1] == wr[1].value
     function test_wr()
+        # we need to be very careful here that we never
+        # use the value directly in this function, so we aren't dependent
+        # on optimizations deleting the root for it before reaching the test
         ref = []
         wref = []
         mk_wr(ref, wref)
         test_wr(ref, wref)
         GC.gc()
         test_wr(ref, wref)
-        pop!(ref)
+        empty!(ref)
         GC.gc()
         @test wref[1].value === nothing
     end
@@ -3254,7 +3277,7 @@ let
     @test forouter() == 3
 end
 
-@test_throws ErrorException("syntax: no outer variable declaration exists for \"for outer\"") @eval function f()
+@test_throws ErrorException("syntax: no outer local variable declaration exists for \"for outer\"") @eval function f()
     for outer i = 1:2
     end
 end
@@ -5716,6 +5739,13 @@ let x5 = UnionField5(nothing, Int8(3))
     @test hash(x5) === hash(x5copy)
 end
 
+struct UnionField6
+    alignment::Int32
+    padding::NTuple{3, UInt8}
+    #= implicit-padding::UInt8 =#
+    maybe_val::Union{UInt16, Nothing} # offset = 8, align = 8, size = 2
+end
+@test UnionField6(1,(1,1,1),2018).maybe_val == 2018
 
 # PR #23367
 struct A23367
@@ -6318,6 +6348,26 @@ let A=[0, missing], B=[missing, 0], C=Vector{Union{Int, Missing}}(undef, 6)
     @test isequal(C, [0, missing, missing, missing, 0, missing])
 end
 
+# issue #29718
+function f29718()
+    nt = NamedTuple{(:a, :b, :c, :d, :e, :f,),
+                    Tuple{Union{Missing, Float64},
+                          Tuple{UInt8},
+                          Union{Missing, Int8},
+                          Int8,
+                          Tuple{UInt8,UInt8},
+                          Union{Missing, Int16}}
+                    }((missing,
+                       (1,),
+                       1,
+                       41,
+                       (1,2),
+                       1915,
+                       ))
+    return Ref{Any}(nt)[].f
+end
+@test f29718() == 1915
+
 end # module UnionOptimizations
 
 # issue #6614, argument destructuring
@@ -6695,3 +6745,52 @@ function repackage28445()
     true
 end
 @test repackage28445()
+
+# issue #28597
+@test_throws ErrorException Array{Int, 2}(undef, 0, -10)
+@test_throws ErrorException Array{Int, 2}(undef, -10, 0)
+@test_throws ErrorException Array{Int, 2}(undef, -1, -1)
+
+# issue #28812
+@test Tuple{Vararg{Array{T},3} where T} === Tuple{Array,Array,Array}
+@test Tuple{Vararg{Array{T} where T,3}} === Tuple{Array,Array,Array}
+
+# issue #29145
+struct T29145{A,B}
+    function T29145()
+        new{S,Ref{S}}() where S
+    end
+end
+@test_throws TypeError T29145()
+
+# interpreted but inferred/optimized top-level expressions with vars
+let code = """
+           while true
+               try
+                   this_is_undefined_29213
+                   ed = 0
+                   break
+               finally
+                   break
+               end
+           end
+           print(42)
+           """
+    @test read(`$(Base.julia_cmd()) --startup-file=no --compile=min -e $code`, String) == "42"
+end
+
+# issue #29175
+function f29175(tuple::T) where {T<:Tuple}
+    prefix::Tuple{T.parameters[1:end-1]...} = tuple[1:length(T.parameters)-1]
+    x = prefix
+    prefix = x  # force another conversion to declared type
+    return prefix
+end
+@test f29175((1,2,3)) === (1,2)
+
+# issue #29306
+let a = [1,2,3,4,missing,6,7]
+    @test_throws TypeError [ (x>6 ? missing : x)  for x in a]
+    foo(x) = x > 0 ? x : missing
+    @test_throws TypeError foo(missing)
+end

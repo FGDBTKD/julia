@@ -699,6 +699,12 @@ end
     @test_throws MethodError repeat(1, 2, 3)
     @test repeat([1, 2], 1, 2, 3) == repeat([1, 2], outer = (1, 2, 3))
 
+    # issue 29614
+    @test repeat(ones(2, 2), 1, 1, 1) == ones(2, 2, 1)
+    @test repeat(ones(2, 2), 2, 2, 2) == ones(4, 4, 2)
+    @test repeat(ones(2), 2, 2, 2) == ones(4, 2, 2)
+    @test repeat(ones(2, 2), inner=(1, 1, 1), outer=(2, 2, 2)) == ones(4, 4, 2)
+
     R = repeat([1, 2])
     @test R == [1, 2]
     R = repeat([1, 2], inner=1)
@@ -1199,11 +1205,13 @@ end
     @test issorted(as[:,1])
     @test issorted(as[:,2])
     @test issorted(as[:,3])
+    @test sort!(copy(a), dims=1) == as
 
     as = sort(a, dims=2)
     @test issorted(as[1,:])
     @test issorted(as[2,:])
     @test issorted(as[3,:])
+    @test sort!(copy(a), dims=2) == as
 
     local b = rand(21,21,2)
 
@@ -1212,15 +1220,18 @@ end
         @test issorted(bs[:,i,1])
         @test issorted(bs[:,i,2])
     end
+    @test sort!(copy(b), dims=1) == bs
 
     bs = sort(b, dims=2)
     for i in 1:21
         @test issorted(bs[i,:,1])
         @test issorted(bs[i,:,2])
     end
+    @test sort!(copy(b), dims=2) == bs
 
     bs = sort(b, dims=3)
     @test all(bs[:,:,1] .<= bs[:,:,2])
+    @test sort!(copy(b), dims=3) == bs
 end
 
 @testset "higher dimensional sortslices" begin
@@ -1686,13 +1697,13 @@ end
     @test I2 + I1 == CartesianIndex((1,8,2))
     @test I1 - I2 == CartesianIndex((3,-2,-2))
     @test I2 - I1 == CartesianIndex((-3,2,2))
-    @test I1 + 1*one(I1) == CartesianIndex((3,4,1))
-    @test I1 - 2*one(I1) == CartesianIndex((0,1,-2))
+    @test I1 + 1*oneunit(I1) == CartesianIndex((3,4,1))
+    @test I1 - 2*oneunit(I1) == CartesianIndex((0,1,-2))
 
     @test zero(CartesianIndex{2}) == CartesianIndex((0,0))
     @test zero(CartesianIndex((2,3))) == CartesianIndex((0,0))
-    @test one(CartesianIndex{2}) == CartesianIndex((1,1))
-    @test one(CartesianIndex((2,3))) == CartesianIndex((1,1))
+    @test oneunit(CartesianIndex{2}) == CartesianIndex((1,1))
+    @test oneunit(CartesianIndex((2,3))) == CartesianIndex((1,1))
 
     @test min(CartesianIndex((2,3)), CartesianIndex((5,2))) == CartesianIndex((2,2))
     @test max(CartesianIndex((2,3)), CartesianIndex((5,2))) == CartesianIndex((5,3))
@@ -1748,6 +1759,10 @@ end
 
     @test @inferred(convert(NTuple{2,UnitRange}, R)) === (2:5, 3:5)
     @test @inferred(convert(Tuple{Vararg{UnitRange}}, R)) === (2:5, 3:5)
+
+    I = CartesianIndex(2,3)
+    J = CartesianIndex(5,4)
+    @test I:J === CartesianIndices((2:5, 3:4))
 end
 
 # All we really care about is that we have an optimized
@@ -2090,38 +2105,38 @@ let f = OOB_Functor([1,2])
     @test_throws BoundsError map(f, [1,2,3,4,5])
 end
 
-# issue 15654
-@test cumprod([5], dims=2) == [5]
-@test cumprod([1 2; 3 4], dims=3) == [1 2; 3 4]
-@test cumprod([1 2; 3 4], dims=1) == [1 2; 3 8]
-@test cumprod([1 2; 3 4], dims=2) == [1 2; 3 12]
+@testset "issue 15654" begin
+    @test cumprod([5], dims=2) == [5]
+    @test cumprod([1 2; 3 4], dims=3) == [1 2; 3 4]
+    @test cumprod([1 2; 3 4], dims=1) == [1 2; 3 8]
+    @test cumprod([1 2; 3 4], dims=2) == [1 2; 3 12]
 
-@test cumsum([5], dims=2) == [5]
-@test cumsum([1 2; 3 4], dims=1) == [1 2; 4 6]
-@test cumsum([1 2; 3 4], dims=2) == [1 3; 3 7]
-@test cumsum([1 2; 3 4], dims=3) == [1 2; 3 4]
+    @test cumsum([5], dims=2) == [5]
+    @test cumsum([1 2; 3 4], dims=1) == [1 2; 4 6]
+    @test cumsum([1 2; 3 4], dims=2) == [1 3; 3 7]
+    @test cumsum([1 2; 3 4], dims=3) == [1 2; 3 4]
 
-@test cumprod!(Vector{Int}(undef, 1), [5], dims=2) == [5]
-@test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=3) == [1 2; 3 4]
-@test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=1) == [1 2; 3 8]
-@test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=2) == [1 2; 3 12]
+    @test cumprod!(Vector{Int}(undef, 1), [5], dims=2) == [5]
+    @test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=3) == [1 2; 3 4]
+    @test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=1) == [1 2; 3 8]
+    @test cumprod!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=2) == [1 2; 3 12]
 
-@test cumsum!(Vector{Int}(undef, 1), [5], dims=2) == [5]
-@test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=1) == [1 2; 4 6]
-@test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=2) == [1 3; 3 7]
-@test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=3) == [1 2; 3 4]
+    @test cumsum!(Vector{Int}(undef, 1), [5], dims=2) == [5]
+    @test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=1) == [1 2; 4 6]
+    @test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=2) == [1 3; 3 7]
+    @test cumsum!(Matrix{Int}(undef, 2, 2), [1 2; 3 4], dims=3) == [1 2; 3 4]
+end
+@testset "issue #18363" begin
+    @test_throws DimensionMismatch cumsum!([0,0], 1:4)
+    @test cumsum(Any[])::Vector{Any} == Any[]
+    @test cumsum(Any[1, 2.3]) == [1, 3.3] == cumsum(Real[1, 2.3])::Vector{Real}
+    @test cumsum([true,true,true]) == [1,2,3]
+    @test cumsum(0x00:0xff)[end] === UInt(255*(255+1)÷2) # no overflow
+    @test accumulate(+, 0x00:0xff)[end] === 0x80         # overflow
+    @test_throws InexactError cumsum!(similar(0x00:0xff), 0x00:0xff) # overflow
 
-# issue #18363
-@test_throws DimensionMismatch cumsum!([0,0], 1:4)
-@test cumsum(Any[])::Vector{Any} == Any[]
-@test cumsum(Any[1, 2.3]) == [1, 3.3] == cumsum(Real[1, 2.3])::Vector{Real}
-@test cumsum([true,true,true]) == [1,2,3]
-@test cumsum(0x00:0xff)[end] === UInt(255*(255+1)÷2) # no overflow
-@test accumulate(+, 0x00:0xff)[end] === 0x80         # overflow
-@test_throws InexactError cumsum!(similar(0x00:0xff), 0x00:0xff) # overflow
-
-@test cumsum([[true], [true], [false]])::Vector{Vector{Int}} == [[1], [2], [2]]
-
+    @test cumsum([[true], [true], [false]])::Vector{Vector{Int}} == [[1], [2], [2]]
+end
 #issue #18336
 @test cumsum([-0.0, -0.0])[1] === cumsum([-0.0, -0.0])[2] === -0.0
 @test cumprod(-0.0im .+ (0:0))[1] === Complex(0.0, -0.0)
@@ -2291,6 +2306,8 @@ end
 
     @test accumulate(min, [1, 2, 5, -1, 3, -2]) == [1, 1, 1, -1, -1, -2]
     @test accumulate(max, [1, 2, 5, -1, 3, -2]) == [1, 2, 5, 5, 5, 5]
+    @test Base.accumulate_pairwise(min, [1, 2, 5, -1, 3, -2]) == [1, 1, 1, -1, -1, -2]
+    @test Base.accumulate_pairwise(max, [1, 2, 5, -1, 3, -2]) == [1, 2, 5, 5, 5, 5]
 
     @test accumulate(max, [1 0; 0 1], dims=1) == [1 0; 1 1]
     @test accumulate(max, [1 0; 0 1], dims=2) == [1 1; 0 1]
@@ -2322,6 +2339,9 @@ end
                 @test out ≈ accumulate_arr
             end
         end
+        arr_cop = similar(arr)
+        cumprod!(arr_cop, arr)
+        @test arr_cop ≈ cumprod(arr)
     end
 
     # exotic indexing
@@ -2455,13 +2475,13 @@ end
 
 # Ensure we can hash strange custom structs — and they hash the same in arrays
 struct totally_not_five26034 end
-Base.isequal(::totally_not_five26034, x)=isequal(5,x);
-Base.isequal(x, ::totally_not_five26034)=isequal(5,x);
+Base.isequal(::totally_not_five26034, x::Number)=isequal(5,x);
+Base.isequal(x::Number, ::totally_not_five26034)=isequal(5,x);
 Base.isequal(::totally_not_five26034, ::totally_not_five26034)=true;
 Base.hash(::totally_not_five26034, h::UInt)=hash(5, h);
 import Base.==
-==(::totally_not_five26034, x)= (5==x);
-==(x,::totally_not_five26034)= (5==x);
+==(::totally_not_five26034, x::Number)= (5==x);
+==(x::Number,::totally_not_five26034)= (5==x);
 ==(::totally_not_five26034,::totally_not_five26034)=true;
 @testset "issue #26034" begin
     n5 = totally_not_five26034()

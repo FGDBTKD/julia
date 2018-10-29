@@ -240,7 +240,7 @@ catch err
     if isa(err, MethodError)
         error("Test correctly returned a MethodError, please change to @test_throws MethodError")
     else
-        rethrow(err)
+        rethrow()
     end
 end
 
@@ -273,6 +273,8 @@ end
         pop!(need_to_handle_undef_sparam, first(methods(Core.Compiler.same_names)))
         pop!(need_to_handle_undef_sparam, which(Core.Compiler.convert, (Type{Union{Core.Compiler.Some{T}, Nothing}} where T, Core.Compiler.Some)))
         pop!(need_to_handle_undef_sparam, which(Core.Compiler.convert, (Type{Union{T, Nothing}} where T, Core.Compiler.Some)))
+        pop!(need_to_handle_undef_sparam, which(Core.Compiler.convert, Tuple{Type{Tuple{Vararg{Int}}}, Tuple{}}))
+        pop!(need_to_handle_undef_sparam, which(Core.Compiler.convert, Tuple{Type{Tuple{Vararg{Int}}}, Tuple{Int8}}))
         @test need_to_handle_undef_sparam == Set()
     end
     let need_to_handle_undef_sparam =
@@ -295,6 +297,8 @@ end
         pop!(need_to_handle_undef_sparam, which(Base.nonmissingtype, Tuple{Type{Union{Missing, T}} where T}))
         pop!(need_to_handle_undef_sparam, which(Base.convert, (Type{Union{Some{T}, Nothing}} where T, Some)))
         pop!(need_to_handle_undef_sparam, which(Base.convert, (Type{Union{T, Nothing}} where T, Some)))
+        pop!(need_to_handle_undef_sparam, which(Base.convert, Tuple{Type{Tuple{Vararg{Int}}}, Tuple{}}))
+        pop!(need_to_handle_undef_sparam, which(Base.convert, Tuple{Type{Tuple{Vararg{Int}}}, Tuple{Int8}}))
         @test need_to_handle_undef_sparam == Set()
     end
 end

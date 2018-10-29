@@ -41,12 +41,12 @@ Range operator. `a:b` constructs a range from `a` to `b` with a step size of 1 (
 # without the second method above, the first method above is ambiguous with
 # (:)(start::A, step, stop::C) where {A<:Real,C<:Real}
 function _colon(start::T, step, stop::T) where T
-    T′ = typeof(start+step)
+    T′ = typeof(start+zero(step))
     StepRange(convert(T′,start), step, convert(T′,stop))
 end
 
 """
-    range(start; length, stop, step=1)
+    range(start[, stop]; length, stop, step=1)
 
 Given a starting value, construct a range either by length or from `start` to `stop`,
 optionally with a given step (defaults to 1, a [`UnitRange`](@ref)).
@@ -57,6 +57,8 @@ automatically such that there are `length` linearly spaced elements in the range
 
 If `step` and `stop` are provided and `length` is not, the overall range length will be computed
 automatically such that the elements are `step` spaced (a [`StepRange`](@ref)).
+
+`stop` may be specified as either a positional or keyword argument.
 
 # Examples
 ```jldoctest
@@ -71,10 +73,24 @@ julia> range(1, step=5, length=100)
 
 julia> range(1, step=5, stop=100)
 1:5:96
+
+julia> range(1, 10, length=101)
+1.0:0.09:10.0
+
+julia> range(1, 100, step=5)
+1:5:96
 ```
 """
 range(start; length::Union{Integer,Nothing}=nothing, stop=nothing, step=nothing) =
     _range(start, step, stop, length)
+
+range(start, stop; length::Union{Integer,Nothing}=nothing, step=nothing) =
+    _range2(start, step, stop, length)
+
+_range2(start, ::Nothing, stop, ::Nothing) =
+    throw(ArgumentError("At least one of `length` or `step` must be specified"))
+
+_range2(start, step, stop, length) = _range(start, step, stop, length)
 
 # Range from start to stop: range(a, [step=s,] stop=b), no length
 _range(start, step,      stop, ::Nothing) = (:)(start, step, stop)
@@ -487,7 +503,7 @@ step_hp(r::AbstractRange) = step(r)
 unsafe_length(r::AbstractRange) = length(r)  # generic fallback
 
 function unsafe_length(r::StepRange)
-    n = Integer(div(r.stop+r.step - r.start, r.step))
+    n = Integer(div((r.stop - r.start) + r.step, r.step))
     isempty(r) ? zero(n) : n
 end
 length(r::StepRange) = unsafe_length(r)
@@ -583,7 +599,7 @@ _in_unit_range(v::UnitRange, val, i::Integer) = i > 0 && val <= v.stop && val >=
 
 function getindex(v::UnitRange{T}, i::Integer) where T
     @_inline_meta
-    val = convert(T, v.start + i - 1)
+    val = convert(T, v.start + (i - 1))
     @boundscheck _in_unit_range(v, val, i) || throw_boundserror(v, i)
     val
 end
@@ -593,7 +609,7 @@ const OverflowSafe = Union{Bool,Int8,Int16,Int32,Int64,Int128,
 
 function getindex(v::UnitRange{T}, i::Integer) where {T<:OverflowSafe}
     @_inline_meta
-    val = v.start + i - 1
+    val = v.start + (i - 1)
     @boundscheck _in_unit_range(v, val, i) || throw_boundserror(v, i)
     val % T
 end

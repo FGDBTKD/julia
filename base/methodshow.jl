@@ -76,7 +76,7 @@ end
 
 function kwarg_decl(m::Method, kwtype::DataType)
     sig = rewrap_unionall(Tuple{kwtype, Any, unwrap_unionall(m.sig).parameters...}, m.sig)
-    kwli = ccall(:jl_methtable_lookup, Any, (Any, Any, UInt), kwtype.name.mt, sig, typemax(UInt))
+    kwli = ccall(:jl_methtable_lookup, Any, (Any, Any, UInt), kwtype.name.mt, sig, max_world(m))
     if kwli !== nothing
         kwli = kwli::Method
         src = uncompressed_ast(kwli)
@@ -319,7 +319,7 @@ function show(io::IO, mime::MIME"text/plain", mt::AbstractVector{Method})
 end
 
 function show(io::IO, mime::MIME"text/html", mt::AbstractVector{Method})
-    print(io, summary(mt))
+    summary(io, mt)
     if !isempty(mt)
         print(io, ":<ul>")
         for d in mt

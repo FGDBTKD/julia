@@ -3,6 +3,8 @@
 using Test, Distributed, Random, Serialization, Sockets
 import Distributed: launch, manage
 
+@test cluster_cookie() isa String
+
 include(joinpath(Sys.BINDIR, "..", "share", "julia", "test", "testenv.jl"))
 
 @test Distributed.extract_imports(:(begin; import Foo, Bar; let; using Baz; end; end)) ==
@@ -490,7 +492,7 @@ end
 pmap_args = [
                 (:distributed, [:default, false]),
                 (:batch_size, [:default,2]),
-                (:on_error, [:default, e -> (e.msg == "foobar" ? true : rethrow(e))]),
+                (:on_error, [:default, e -> (e.msg == "foobar" ? true : rethrow())]),
                 (:retry_delays, [:default, fill(0.001, 1000)]),
                 (:retry_check, [:default, (s,e) -> (s,endswith(e.msg,"foobar"))]),
             ]
@@ -550,9 +552,9 @@ function walk_args(i)
 
         try
             results_test(pmap(mapf, data; kwargs...))
-        catch e
+        catch
             println("pmap executing with args : ", kwargs)
-            rethrow(e)
+            rethrow()
         end
 
         return
@@ -660,12 +662,12 @@ if Sys.isunix() # aka have ssh
             w_in_remote = sort(remotecall_fetch(workers, p))
             try
                 @test intersect(new_pids, w_in_remote) == new_pids
-            catch e
+            catch
                 print("p       :     $p\n")
                 print("newpids :     $new_pids\n")
                 print("w_in_remote : $w_in_remote\n")
                 print("intersect   : $(intersect(new_pids, w_in_remote))\n\n\n")
-                rethrow(e)
+                rethrow()
             end
         end
 
@@ -1524,6 +1526,14 @@ end
 # issue #27933
 a27933 = :_not_defined_27933
 @test remotecall_fetch(()->a27933, first(workers())) === a27933
+
+# PR #28651
+for T in (UInt8, Int8, UInt16, Int16, UInt32, Int32, UInt64)
+    n = @distributed (+) for i in Base.OneTo(T(10))
+        i
+    end
+    @test n == 55
+end
 
 # Run topology tests last after removing all workers, since a given
 # cluster at any time only supports a single topology.

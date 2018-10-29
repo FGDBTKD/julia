@@ -154,7 +154,7 @@
 
 (define initial-reserved-word? (Set initial-reserved-words))
 
-(define reserved-words (append initial-reserved-words '(end else catch finally true false))) ;; todo: make this more complete
+(define reserved-words (append initial-reserved-words '(end else elseif catch finally true false))) ;; todo: make this more complete
 
 (define reserved-word? (Set reserved-words))
 
@@ -767,7 +767,7 @@
             ;; (ex1) => ex1
             (car ex))
         (begin (take-token s)
-               (if (or (eof-object? (peek-token s)) (eq? (peek-token s) '=))
+               (if (eq? (peek-token s) '=) ;; allow x, = ...
                    (loop ex #f (peek-token s))
                    (loop (cons (parse-pair s) ex) #f (peek-token s)))))))
 
@@ -779,7 +779,7 @@
            (begin (if (not (ts:space? s))
                       (error "space required before \"?\" operator"))
                   (take-token s) ; take the ?
-                  (let ((t (with-whitespace-newline (without-range-colon (peek-token s)))))
+                  (let ((t (with-whitespace-newline (without-range-colon (require-token s)))))
                     (if (not (ts:space? s))
                         (error "space required after \"?\" operator")))
                   (let ((then (without-range-colon (parse-eq* s))))
@@ -788,7 +788,7 @@
                     (if (not (ts:space? s))
                         (error "space required before colon in \"?\" expression"))
                     (take-token s) ; take the :
-                    (let ((t (with-whitespace-newline (peek-token s))))
+                    (let ((t (with-whitespace-newline (require-token s))))
                       (if (not (ts:space? s))
                           (error "space required after colon in \"?\" expression")))
                     (list 'if ex then (parse-eq* s)))))
@@ -830,7 +830,7 @@
              (first? #t))
     (let* ((t   (peek-token s))
            (spc (ts:space? s)))
-      (cond ((and first? (eq? t '|..|))
+      (cond ((and first? (is-prec-colon? t) (not (eq? t ':)))
              (take-token s)
              `(call ,t ,ex ,(parse-expr s)))
             ((and range-colon-enabled (eq? t ':))

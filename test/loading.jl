@@ -93,6 +93,14 @@ let shastr = "ab"^20
     @test "check $hash" == "check $shastr"
 end
 
+let shastr1 = "ab"^20, shastr2 = "ac"^20
+    hash1 = SHA1(shastr1)
+    hash2 = SHA1(shastr2)
+    @test isless(hash1, hash2)
+    @test !isless(hash2, hash1)
+    @test !isless(hash1, hash1)
+end
+
 let uuidstr = "ab"^4 * "-" * "ab"^2 * "-" * "ab"^2 * "-" * "ab"^2 * "-" * "ab"^6
     uuid = UUID(uuidstr)
     @test uuid == eval(Meta.parse(repr(uuid))) # check show method
@@ -545,6 +553,22 @@ try
 finally
     Base.ACTIVE_PROJECT[] = old_act_proj
     popfirst!(LOAD_PATH)
+end
+
+@testset "--project and JULIA_PROJECT paths should be absolutified" begin
+    mktempdir() do dir; cd(dir) do
+        mkdir("foo")
+        script = """
+        using Test
+        old = Base.active_project()
+        cd("foo")
+        @test Base.active_project() == old
+        """
+        @test success(`$(Base.julia_cmd()) --project=foo -e $(script)`)
+        withenv("JULIA_PROJECT" => "foo") do
+            @test success(`$(Base.julia_cmd()) -e $(script)`)
+        end
+    end; end
 end
 
 ## cleanup after tests ##

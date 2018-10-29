@@ -3,6 +3,8 @@
 eltype(::Type{<:AbstractSet{T}}) where {T} = @isdefined(T) ? T : Any
 sizehint!(s::AbstractSet, n) = nothing
 
+copy!(dst::AbstractSet, src::AbstractSet) = union!(empty!(dst), src)
+
 """
     union(s, itrs...)
     ∪(s, itrs...)
@@ -226,14 +228,15 @@ end
 <=(l::AbstractSet, r::AbstractSet) = l ⊆ r
 
 function issubset(l, r)
+    if haslength(r)
+        rlen = length(r)
+        #This threshold was empirically determined by repeatedly
+        #sampling using these two methods (see #26198)
+        lenthresh = 70
 
-    rlen = length(r)
-    #This threshold was empirically determined by repeatedly
-    #sampling using these two methods.
-    lenthresh = 70
-
-    if rlen > lenthresh && !isa(r, AbstractSet)
-       return issubset(l, Set(r))
+        if rlen > lenthresh && !isa(r, AbstractSet)
+            return issubset(l, Set(r))
+        end
     end
 
     for elt in l

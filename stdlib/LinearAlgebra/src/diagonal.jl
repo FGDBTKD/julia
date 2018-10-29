@@ -116,13 +116,17 @@ ishermitian(D::Diagonal{<:Number}) = isreal(D.diag)
 ishermitian(D::Diagonal) = all(ishermitian, D.diag)
 issymmetric(D::Diagonal{<:Number}) = true
 issymmetric(D::Diagonal) = all(issymmetric, D.diag)
-isposdef(D::Diagonal) = all(x -> x > 0, D.diag)
+isposdef(D::Diagonal) = all(isposdef, D.diag)
 
 factorize(D::Diagonal) = D
 
 real(D::Diagonal) = Diagonal(real(D.diag))
 imag(D::Diagonal) = Diagonal(imag(D.diag))
 
+iszero(D::Diagonal) = all(iszero, D.diag)
+isone(D::Diagonal) = all(isone, D.diag)
+isdiag(D::Diagonal) = all(isdiag, D.diag)
+isdiag(D::Diagonal{<:Number}) = true
 istriu(D::Diagonal) = true
 istril(D::Diagonal) = true
 function triu!(D::Diagonal,k::Integer=0)
@@ -277,9 +281,9 @@ mul!(out::AbstractVector, A::Diagonal, in::AbstractVector) = out .= A.diag .* in
 mul!(out::AbstractVector, A::Adjoint{<:Any,<:Diagonal}, in::AbstractVector) = out .= adjoint.(A.parent.diag) .* in
 mul!(out::AbstractVector, A::Transpose{<:Any,<:Diagonal}, in::AbstractVector) = out .= transpose.(A.parent.diag) .* in
 
-mul!(out::AbstractMatrix, A::Diagonal, in::AbstractMatrix) = out .= A.diag .* in
-mul!(out::AbstractMatrix, A::Adjoint{<:Any,<:Diagonal}, in::AbstractMatrix) = out .= adjoint.(A.parent.diag) .* in
-mul!(out::AbstractMatrix, A::Transpose{<:Any,<:Diagonal}, in::AbstractMatrix) = out .= transpose.(A.parent.diag) .* in
+mul!(out::AbstractMatrix, A::Diagonal, in::StridedMatrix) = out .= A.diag .* in
+mul!(out::AbstractMatrix, A::Adjoint{<:Any,<:Diagonal}, in::StridedMatrix) = out .= adjoint.(A.parent.diag) .* in
+mul!(out::AbstractMatrix, A::Transpose{<:Any,<:Diagonal}, in::StridedMatrix) = out .= transpose.(A.parent.diag) .* in
 
 # ambiguities with Symmetric/Hermitian
 # RealHermSymComplex[Sym]/[Herm] only include Number; invariant to [c]transpose

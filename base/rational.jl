@@ -155,7 +155,7 @@ function rationalize(::Type{T}, x::AbstractFloat, tol::Real) where T<:Integer
             p, pp = np, p
             q, qq = nq, q
         catch e
-            isa(e,InexactError) || isa(e,OverflowError) || rethrow(e)
+            isa(e,InexactError) || isa(e,OverflowError) || rethrow()
             return p // q
         end
 
@@ -180,7 +180,7 @@ function rationalize(::Type{T}, x::AbstractFloat, tol::Real) where T<:Integer
         nq = checked_add(checked_mul(ia,q),qq)
         return np // nq
     catch e
-        isa(e,InexactError) || isa(e,OverflowError) || rethrow(e)
+        isa(e,InexactError) || isa(e,OverflowError) || rethrow()
         return p // q
     end
 end
@@ -225,6 +225,8 @@ sign(x::Rational) = oftype(x, sign(x.num))
 signbit(x::Rational) = signbit(x.num)
 copysign(x::Rational, y::Real) = copysign(x.num,y) // x.den
 copysign(x::Rational, y::Rational) = copysign(x.num,y.num) // x.den
+
+abs(x::Rational) = Rational(abs(x.num), x.den)
 
 typemin(::Type{Rational{T}}) where {T<:Integer} = -one(T)//zero(T)
 typemax(::Type{Rational{T}}) where {T<:Integer} = one(T)//zero(T)
